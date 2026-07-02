@@ -42,19 +42,6 @@ export interface MediumServiceOptions {
  * one-file change. Each entry lists fallbacks tried in order.
  */
 const SELECTORS = {
-  /** Signin detection — presence of any of these means "not logged in". */
-  signedOutMarkers: [
-    'a[href*="/m/signin"]',
-    'button:has-text("Sign in")',
-    'a:has-text("Get started")',
-  ],
-  /** Positive proof of an authenticated session (top-nav avatar / write link). */
-  signedInMarkers: [
-    'a[href="/new-story"]',
-    'button[aria-label*="user" i]',
-    'img[data-testid="authorPhoto"]',
-    'header img[alt]',
-  ],
   /** The story title field in the editor (contenteditable). */
   title: [
     'h3[data-testid="editorTitleParagraph"]',
@@ -91,8 +78,11 @@ const SELECTORS = {
 
 const MEDIUM_ORIGIN = 'https://medium.com';
 const NEW_STORY_URL = `${MEDIUM_ORIGIN}/new-story`;
-const DRAFTS_URL = `${MEDIUM_ORIGIN}/me/stories/drafts`;
 const SIGNIN_URL = `${MEDIUM_ORIGIN}/m/signin`;
+
+/** A realistic desktop Chrome UA so headless runs don't advertise "HeadlessChrome". */
+const DESKTOP_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36';
 
 export class MediumService {
   private sessionDir: string;
@@ -164,8 +154,16 @@ export class MediumService {
         timeout: this.actionTimeoutMs,
         viewport: { width: 1280, height: 900 },
         permissions: ['clipboard-read', 'clipboard-write'],
+        userAgent: DESKTOP_UA,
+        // Reduce the automation fingerprint that trips Cloudflare's bot check.
+        args: ['--disable-blink-features=AutomationControlled'],
+        ignoreDefaultArgs: ['--enable-automation'],
       });
       this.context.setDefaultTimeout(this.actionTimeoutMs);
+      // Hide the webdriver flag on every page/navigation.
+      await this.context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      });
       return this.context;
     } catch (err) {
       throw new NetworkError(
@@ -209,49 +207,40 @@ export class MediumService {
   }
 
   /**
-   * Decide whether the current page represents an authenticated session.
-   * Requires a *positive* signed-in signal — the mere absence of a signin link
-   * is not enough, because Medium (via Cloudflare) can serve a "Just a moment…"
-   * bot-challenge interstitial that has neither signin nor authenticated markup.
+   * Whether the context holds Medium's authenticated-user cookie. This is the
+   * reliable signal for "logged in" — page scraping is unreliable because Medium
+   * (via Cloudflare) can serve a "Verify you are human" interstitial with no
+   * authenticated markup.
+   *
+   * We require `uid` (the logged-in user id), NOT `sid`: Medium sets `sid` for
+   * anonymous visitors too, so checking `sid` yields false positives.
    */
-  private async isSignedIn(page: Page): Promise<boolean> {
-    if (/\/m\/signin|\/signin\b/.test(page.url())) return false;
-
-    // Bot-challenge / access interstitial → not a usable session.
-    const title = (await page.title().catch(() => '')).toLowerCase();
-    if (
-      title.includes('just a moment') ||
-      title.includes('attention required') ||
-      title.includes('access denied') ||
-      title.includes('sign in')
-    ) {
+  private async hasAuthCookie(ctx: BrowserContext): Promise<boolean> {
+    try {
+      const cookies = await ctx.cookies(MEDIUM_ORIGIN);
+      return cookies.some((c) => c.name === 'uid' && Boolean(c.value));
+    } catch {
       return false;
     }
-
-    for (const marker of SELECTORS.signedOutMarkers) {
-      if ((await page.locator(marker).count()) > 0) return false;
-    }
-    for (const marker of SELECTORS.signedInMarkers) {
-      if ((await page.locator(marker).count()) > 0) return true;
-    }
-    // Ambiguous (no signin markers, no positive proof): treat as signed in only
-    // if still on an authenticated Medium route that unauthenticated users are
-    // redirected away from.
-    return /medium\.com\/me(\/|$)/.test(page.url());
   }
 
   // ── Authentication ──────────────────────────────────────────────────────
 
   /**
    * Open a visible browser for the user to sign in, then persist the session.
-   * Resolves once a logged-in session is detected or rejects on timeout.
+   * Resolves once the Medium auth cookie appears or rejects on timeout.
+   *
+   * IMPORTANT: while waiting we poll cookies **without touching the page** — we
+   * never reload it. Reloading would interrupt the Cloudflare "verify you are
+   * human" challenge and the sign-in form the user is actively completing.
    * Closes the headed context afterward so later headless publishes can reuse
    * the same profile directory.
    */
-  async login(timeoutMs = 180_000): Promise<MediumUser> {
+  async login(timeoutMs = 300_000): Promise<MediumUser> {
     // The login window must be visible regardless of the configured headless
     // mode, and no other context may hold the profile lock.
     await this.close();
+    const ctx = await this.getContext(false);
     const page = await this.getPage(false);
     try {
       await page.goto(SIGNIN_URL, { waitUntil: 'domcontentloaded' });
@@ -261,26 +250,24 @@ export class MediumService {
       });
     }
 
-    this.logger.info('Waiting for interactive Medium login…');
+    this.logger.info(
+      'Waiting for interactive Medium login — sign in and solve any "verify you are human" check in the window…',
+    );
     const deadline = Date.now() + timeoutMs;
-    // Poll for a signed-in session by watching the drafts page.
     while (Date.now() < deadline) {
-      try {
-        await page.goto(DRAFTS_URL, { waitUntil: 'domcontentloaded' });
-        if (await this.isSignedIn(page)) {
-          const user = await this.scrapeUser(page);
-          this.cachedUser = user;
-          await this.close(); // release lock so publishing can relaunch headless
-          this.logger.info('Medium login successful', { username: user.username });
-          return user;
-        }
-      } catch {
-        // page may be mid-navigation during login; keep polling
+      if (await this.hasAuthCookie(ctx)) {
+        const user = await this.scrapeUserSafe(page);
+        this.cachedUser = user;
+        await this.close(); // release lock so publishing can relaunch headless
+        this.logger.info('Medium login successful', { username: user.username });
+        return user;
       }
       await page.waitForTimeout(2_000);
     }
     await this.close();
-    throw new AuthError('Timed out waiting for Medium login. Please try `medium_login` again.');
+    throw new AuthError(
+      'Timed out waiting for Medium login. Run `medium_login` (or `bun run login`) and complete sign-in in the window.',
+    );
   }
 
   /** Delete the persisted session so the next login starts fresh. */
@@ -306,12 +293,11 @@ export class MediumService {
   > {
     if (!this.hasSession()) return { valid: false, reason: 'No saved session. Run `medium_login`.' };
     try {
-      const page = await this.getPage();
-      await page.goto(DRAFTS_URL, { waitUntil: 'domcontentloaded' });
-      if (!(await this.isSignedIn(page))) {
+      const ctx = await this.getContext();
+      if (!(await this.hasAuthCookie(ctx))) {
         return { valid: false, reason: 'Session expired or signed out. Run `medium_login`.' };
       }
-      const user = await this.scrapeUser(page);
+      const user = await this.scrapeUserSafe(await this.getPage());
       this.cachedUser = user;
       return { valid: true, user };
     } catch (err) {
@@ -324,14 +310,33 @@ export class MediumService {
   /** Fetch and cache the authenticated user. */
   async currentUser(force = false): Promise<MediumUser> {
     if (this.cachedUser && !force) return this.cachedUser;
-    const page = await this.getPage();
-    await page.goto(`${MEDIUM_ORIGIN}/me`, { waitUntil: 'domcontentloaded' });
-    if (!(await this.isSignedIn(page))) {
+    const ctx = await this.getContext();
+    if (!(await this.hasAuthCookie(ctx))) {
       throw new AuthError('Not logged in to Medium. Run the `medium_login` tool first.');
     }
-    this.cachedUser = await this.scrapeUser(page);
+    this.cachedUser = await this.scrapeUserSafe(await this.getPage());
     this.logger.debug('Fetched current user', { username: this.cachedUser.username });
     return this.cachedUser;
+  }
+
+  /**
+   * Navigate to the profile and scrape the user; tolerant of a challenge page,
+   * returning a minimal placeholder rather than throwing (the session is still
+   * valid — proven by the auth cookie — even if the profile page can't be read).
+   */
+  private async scrapeUserSafe(page: Page): Promise<MediumUser> {
+    try {
+      await page.goto(`${MEDIUM_ORIGIN}/me`, { waitUntil: 'domcontentloaded' });
+      return await this.scrapeUser(page);
+    } catch {
+      return {
+        id: 'me',
+        username: 'me',
+        name: 'Medium user',
+        url: `${MEDIUM_ORIGIN}/me`,
+        imageUrl: '',
+      };
+    }
   }
 
   /**
@@ -349,8 +354,12 @@ export class MediumService {
       }
     }
     const username = /@([^/?#]+)/.exec(url)?.[1] ?? 'me';
+    const rawTitle = (await page.title().catch(() => '')).replace(/\s*[–-].*$/, '').trim();
+    // Ignore interstitial/challenge titles so they never become the display name.
     const name =
-      (await page.title().catch(() => '')).replace(/\s*[–-].*$/, '').trim() || username;
+      rawTitle && !/just a moment|attention required|verify|medium/i.test(rawTitle)
+        ? rawTitle
+        : username;
     const imageUrl = await page
       .locator('img[alt*="' + name + '" i], img[data-testid="authorPhoto"]')
       .first()
@@ -392,12 +401,13 @@ export class MediumService {
         ? toPlainText(request.content)
         : request.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     const status = request.publishStatus ?? 'draft';
+    const ctx = await this.getContext();
+    if (!(await this.hasAuthCookie(ctx))) {
+      throw new AuthError('Not logged in to Medium. Run the `medium_login` tool first.');
+    }
     const page = await this.getPage();
 
     await page.goto(NEW_STORY_URL, { waitUntil: 'domcontentloaded' });
-    if (!(await this.isSignedIn(page))) {
-      throw new AuthError('Not logged in to Medium. Run the `medium_login` tool first.');
-    }
 
     // Title.
     const title = await this.firstVisible(page, SELECTORS.title, this.actionTimeoutMs);

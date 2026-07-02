@@ -50,6 +50,8 @@ function fakePage(urlForPath: (path: string) => string) {
 
 const contextClose = vi.fn(async () => undefined);
 let pageFactory: () => Record<string, unknown>;
+// Auth cookies the fake context reports; set per test to simulate logged in/out.
+let cookieState: Array<{ name: string; value: string }> = [];
 
 vi.mock('playwright', () => ({
   chromium: {
@@ -59,6 +61,8 @@ vi.mock('playwright', () => ({
         pages: () => [page],
         newPage: async () => page,
         setDefaultTimeout: vi.fn(),
+        addInitScript: vi.fn(async () => undefined),
+        cookies: vi.fn(async () => cookieState),
         close: contextClose,
       };
     }),
@@ -82,9 +86,11 @@ function makeService() {
 describe('MediumService (browser-based)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    cookieState = [];
   });
 
   it('saves a draft and derives the post id from the editor URL', async () => {
+    cookieState = [{ name: 'uid', value: 'abc' }]; // logged in
     pageFactory = () =>
       fakePage((url) =>
         url.includes('/new-story') ? 'https://medium.com/p/abc123def456/edit' : url,
@@ -103,14 +109,10 @@ describe('MediumService (browser-based)', () => {
     expect(post.tags).toEqual(['ai', 'agents']);
   });
 
-  it('validates an active session and scrapes the username', async () => {
+  it('validates an active session (auth cookie present) and scrapes the username', async () => {
+    cookieState = [{ name: 'uid', value: 'abc' }]; // logged in
     pageFactory = () =>
-      fakePage((url) => {
-        // Logged-in users stay on the drafts route; /me redirects to the profile.
-        if (url.includes('/me/stories/drafts')) return 'https://medium.com/me/stories/drafts';
-        if (url.endsWith('/me')) return 'https://medium.com/@janedoe';
-        return url;
-      });
+      fakePage((url) => (url.endsWith('/me') ? 'https://medium.com/@janedoe' : url));
     const svc = makeService();
     const result = await svc.validateSession();
     expect(result.valid).toBe(true);
@@ -120,15 +122,16 @@ describe('MediumService (browser-based)', () => {
     }
   });
 
-  it('reports an invalid session when redirected to signin', async () => {
-    pageFactory = () =>
-      fakePage(() => 'https://medium.com/m/signin?redirect=%2Fme');
+  it('reports an invalid session when the auth cookie is absent', async () => {
+    cookieState = []; // no sid cookie
+    pageFactory = () => fakePage((url) => url);
     const svc = makeService();
     const result = await svc.validateSession();
     expect(result.valid).toBe(false);
   });
 
   it('throws AuthError when publishing without a session', async () => {
+    cookieState = []; // no sid cookie
     pageFactory = () => fakePage(() => 'https://medium.com/m/signin');
     const svc = makeService();
     await expect(
