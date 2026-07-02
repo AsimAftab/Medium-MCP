@@ -101,13 +101,29 @@ bun run install:browser
 
 # 3. Run
 bun start          # production (built)
-bun run dev        # watch mode (bun --watch)
+bun run dev        # watch mode (tsx)
 ```
 
-Then, from your MCP client, **run the `medium_login` tool once**: a browser window
-opens, you sign in to Medium normally, and the session is saved. From then on
-`publish_article` runs headless. Check status any time with `session_status`, and clear
-the saved session with `medium_logout`.
+> Bun is the package manager, but the server runs on the **Node** runtime (via
+> `tsx`/`node`) because Playwright — which drives the browser — is not compatible
+> with the Bun runtime. `bun run <script>` still works for everything.
+
+**Log in once** so the server has a Medium session. Either:
+
+```bash
+bun run login       # opens a browser; sign in; session is saved
+bun run session     # verify the session is active
+```
+
+or, from your MCP client, run the **`medium_login`** tool (same effect). From then on
+`publish_article` runs headless. Check status with `session_status` and clear the saved
+session with `medium_logout`.
+
+> **Session sharing:** the login is stored in `MEDIUM_SESSION_DIR`, which defaults to a
+> path *relative* to the working directory. The CLI runs from the project folder, but
+> your MCP client launches the server from elsewhere — so set `MEDIUM_SESSION_DIR` to an
+> **absolute** path in both your `.env` and the client's `env` block so they share one
+> session.
 
 ## Configuration
 
@@ -212,7 +228,7 @@ tool inputs, and a plugin-friendly template/persona registry. See
 ## Development
 
 ```bash
-bun run dev        # watch-mode server (bun --watch)
+bun run dev        # watch-mode server (tsx, Node runtime)
 bun run build      # compile to dist/ (tsc, emits types)
 bun run typecheck  # tsc --noEmit
 bun run lint       # eslint

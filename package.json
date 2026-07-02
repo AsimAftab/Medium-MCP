@@ -30,7 +30,7 @@
     "node": ">=18.17.0"
   },
   "scripts": {
-    "dev": "bun --watch src/index.ts",
+    "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.build.json",
     "clean": "rimraf dist",
@@ -44,6 +44,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "install:browser": "playwright install chromium",
+    "login": "tsx src/cli/login.ts",
+    "session": "tsx src/cli/status.ts",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
@@ -66,6 +68,7 @@
     "eslint-config-prettier": "^9.1.0",
     "prettier": "^3.4.2",
     "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"
   }
