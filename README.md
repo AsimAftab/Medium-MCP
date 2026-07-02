@@ -134,7 +134,7 @@ required.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `MEDIUM_SESSION_DIR` | `<MEDIUM_DATA_DIR>/browser-profile` | Where the persisted login session is stored. |
-| `MEDIUM_HEADLESS` | `true` | Run the browser headless when publishing. `medium_login` always opens a visible window. |
+| `MEDIUM_HEADLESS` | `true` | Run the browser headless when publishing. Set to **`false`** if Medium's Cloudflare check blocks headless publishing (common). `medium_login` always opens a visible window. |
 | `MEDIUM_BROWSER_TIMEOUT` | `30000` | Per-action browser timeout (ms). |
 | `MEDIUM_DEFAULT_PUBLICATION` | — | Default publication id. |
 | `MEDIUM_DEFAULT_TAGS` | — | Comma-separated default tags. |
@@ -249,6 +249,9 @@ See [docs/troubleshooting.md](docs/troubleshooting.md). Common items:
 - **"Failed to launch browser"** — run `bun run install:browser` to download Chromium.
 - **Nothing published** — publishing needs a logged-in session; without one, writing/SEO
   tools still work fully offline.
+- **Publish fails with a Cloudflare "verify you are human" error** — headless Chromium
+  often can't pass Medium's bot check. Set **`MEDIUM_HEADLESS=false`** so publishing uses
+  a visible browser (which passes the check, like login does).
 - **Publish seems stuck / editor changed** — Medium's editor markup can change and break
   a selector; the selectors live in one map in `src/services/medium-service.ts`. Set
   `MEDIUM_HEADLESS=false` to watch the automation and diagnose.

@@ -31,10 +31,14 @@ function fakePage(urlForPath: (path: string) => string) {
     }),
     url: () => current,
     title: vi.fn(async () => 'Jane Doe – Medium'),
-    // A logged-in Medium page exposes a "New story" link; report it present so
-    // the positive signed-in check passes (mirrors real authenticated markup).
+    // Report the editor title element present so waitForEditorReady() proceeds
+    // (mirrors the real loaded editor DOM).
     locator: vi.fn((sel: string) =>
-      fakeLocator({ count: vi.fn(async () => (sel.includes('new-story') ? 1 : 0)) }),
+      fakeLocator({
+        count: vi.fn(async () =>
+          sel.includes('editorTitleParagraph') || sel.includes('new-story') ? 1 : 0,
+        ),
+      }),
     ),
     keyboard: {
       type: vi.fn(async () => undefined),

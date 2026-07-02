@@ -49,13 +49,6 @@ const SELECTORS = {
     '.graf--title',
     '[name="title"]',
   ],
-  /** The story body field in the editor (contenteditable). */
-  body: [
-    'div[data-testid="editorBodyParagraph"]',
-    'p[data-testid="editorBodyParagraph"]',
-    'div.section-inner p.graf--p',
-    'article [contenteditable="true"]',
-  ],
   /** Top-right "Publish" button that opens the publish dialog. */
   publishButton: [
     'button[data-testid="publishButton"]',
@@ -442,6 +435,7 @@ export class MediumService {
     const page = await this.getPage();
 
     await page.goto(NEW_STORY_URL, { waitUntil: 'domcontentloaded' });
+    await this.waitForEditorReady(page);
 
     // Title.
     const title = await this.firstVisible(page, SELECTORS.title, this.actionTimeoutMs);
@@ -451,11 +445,10 @@ export class MediumService {
 
     // Body — paste rich HTML so headings/lists/code/images survive.
     await this.pasteHtml(page, html, plain);
-    // Let Medium autosave settle so the draft URL is assigned.
-    await page.waitForTimeout(1_500);
 
     if (status === 'draft') {
-      const url = await this.resolvePostUrl(page);
+      // Medium autosaves the story and assigns a /p/<id>/edit URL; wait for it.
+      const url = await this.waitForDraftUrl(page);
       this.logger.info('Saved Medium draft', { url });
       return this.toPost(request, url, 'draft');
     }
@@ -482,30 +475,54 @@ export class MediumService {
     return this.toPost(request, url, status);
   }
 
-  /** Write `html` to the clipboard and paste it into the focused editor body. */
+  /**
+   * Insert rich HTML into the editor body by dispatching a synthetic `paste`
+   * event carrying a DataTransfer. Medium's editor processes the `text/html`
+   * payload and preserves headings/bold/lists/code — far more reliable than the
+   * OS clipboard + Ctrl+V, which the custom editor ignores in automation.
+   * Assumes the caret is already in the body (after the title + Enter).
+   */
   private async pasteHtml(page: Page, html: string, plain: string): Promise<void> {
     try {
-      const body = await this.firstVisible(page, SELECTORS.body, this.actionTimeoutMs).catch(
-        () => null,
-      );
-      if (body) await body.click();
-      await page.evaluate(
-        async ({ h, p }) => {
+      const result = await page.evaluate(
+        ({ h, p }) => {
           // Runs in the browser; type the DOM globals absent from Node's lib.
-          const g = globalThis as unknown as {
-            ClipboardItem: new (items: Record<string, Blob>) => unknown;
-            Blob: new (parts: unknown[], opts?: { type?: string }) => Blob;
-            navigator: { clipboard: { write(data: unknown[]): Promise<void> } };
+          type Editable = {
+            getAttribute(name: string): string | null;
+            focus(): void;
+            dispatchEvent(event: unknown): boolean;
           };
-          const item = new g.ClipboardItem({
-            'text/html': new g.Blob([h], { type: 'text/html' }),
-            'text/plain': new g.Blob([p], { type: 'text/plain' }),
-          });
-          await g.navigator.clipboard.write([item]);
+          const g = globalThis as unknown as {
+            document: {
+              activeElement: Editable | null;
+              querySelector(selector: string): Editable | null;
+            };
+            DataTransfer: new () => { setData(type: string, data: string): void };
+            ClipboardEvent: new (
+              type: string,
+              init: { clipboardData: unknown; bubbles: boolean; cancelable: boolean },
+            ) => unknown;
+          };
+          const active = g.document.activeElement;
+          const el =
+            active && active.getAttribute('contenteditable') === 'true'
+              ? active
+              : g.document.querySelector('[contenteditable="true"]');
+          if (!el) return 'no-editable';
+          el.focus();
+          const dt = new g.DataTransfer();
+          dt.setData('text/html', h);
+          dt.setData('text/plain', p);
+          el.dispatchEvent(
+            new g.ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }),
+          );
+          return 'ok';
         },
         { h: html, p: plain },
       );
-      await page.keyboard.press('Control+V');
+      if (result !== 'ok') throw new Error(`no editable target for paste (${result})`);
+      // Give Medium's editor a moment to render the pasted nodes.
+      await page.waitForTimeout(1_500);
     } catch (err) {
       // Fallback: type the plain text so at least the content lands.
       this.logger.warn('HTML paste failed; falling back to plain-text insert', {
@@ -513,6 +530,41 @@ export class MediumService {
       });
       await page.keyboard.insertText(plain);
     }
+  }
+
+  /**
+   * Wait for the editor to be interactive, tolerating a brief Cloudflare
+   * interstitial. Throws a clear, actionable error if the challenge never
+   * clears (the common cause of headless failures).
+   */
+  private async waitForEditorReady(page: Page): Promise<void> {
+    const deadline = Date.now() + Math.max(this.actionTimeoutMs, 45_000);
+    const isChallenge = (t: string): boolean =>
+      /just a moment|verify you are human|attention required|access denied/i.test(t);
+    while (Date.now() < deadline) {
+      const title = await page.title().catch(() => '');
+      if (!isChallenge(title) && (await page.locator(SELECTORS.title[0]!).count()) > 0) return;
+      await page.waitForTimeout(1_000);
+    }
+    const finalTitle = await page.title().catch(() => '');
+    if (isChallenge(finalTitle)) {
+      throw new NetworkError(
+        'Medium is showing a Cloudflare "verify you are human" challenge the browser could not pass. ' +
+          'This typically happens in headless mode — set MEDIUM_HEADLESS=false to publish with a visible browser.',
+      );
+    }
+    throw new NetworkError('Timed out waiting for the Medium editor to load.');
+  }
+
+  /** Poll for the autosaved draft URL (`/p/<id>/edit`); fall back to current URL. */
+  private async waitForDraftUrl(page: Page, timeoutMs = 20_000): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const url = page.url();
+      if (/\/p\/[0-9a-fA-F]+|\/edit(?:[/?#]|$)/.test(url)) return url;
+      await page.waitForTimeout(1_000);
+    }
+    return page.url();
   }
 
   /** Type each tag into the publish dialog's topic input. */
