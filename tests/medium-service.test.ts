@@ -44,6 +44,7 @@ function fakePage(urlForPath: (path: string) => string) {
     evaluate: vi.fn(async () => undefined),
     waitForTimeout: vi.fn(async () => undefined),
     waitForLoadState: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined),
   };
   return page;
 }

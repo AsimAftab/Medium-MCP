@@ -28,12 +28,19 @@ async function main(): Promise<void> {
 
   process.stderr.write(
     `Opening a browser window for Medium login…\n` +
-      `Sign in normally (Google/email/2FA all work), then leave it — the session saves automatically.\n` +
       `Session dir: ${cfg.medium.sessionDir}\n\n`,
   );
 
   try {
-    const user = await medium.login();
+    await medium.beginLogin();
+    process.stderr.write(
+      `A browser window is open. Sign in normally (Google/email/2FA all work) and\n` +
+        `solve any "verify you are human" check. When you're fully signed in,\n` +
+        `come back here and press Enter…`,
+    );
+    await waitForEnter();
+
+    const user = await medium.completeLogin();
     process.stderr.write(
       `\n✅ Logged in as ${user.name} (@${user.username}). Session saved — publishing will now run headless.\n`,
     );
@@ -45,6 +52,17 @@ async function main(): Promise<void> {
   } finally {
     await medium.close();
   }
+}
+
+/** Resolve when the user presses Enter in the terminal. */
+function waitForEnter(): Promise<void> {
+  return new Promise((resolve) => {
+    process.stdin.resume();
+    process.stdin.once('data', () => {
+      process.stdin.pause();
+      resolve();
+    });
+  });
 }
 
 void main();

@@ -227,20 +227,15 @@ export class MediumService {
   // ── Authentication ──────────────────────────────────────────────────────
 
   /**
-   * Open a visible browser for the user to sign in, then persist the session.
-   * Resolves once the Medium auth cookie appears or rejects on timeout.
-   *
-   * IMPORTANT: while waiting we poll cookies **without touching the page** — we
-   * never reload it. Reloading would interrupt the Cloudflare "verify you are
-   * human" challenge and the sign-in form the user is actively completing.
-   * Closes the headed context afterward so later headless publishes can reuse
-   * the same profile directory.
+   * Open a visible browser at the Medium signin page and leave it open for the
+   * user to sign in. Does not wait or poll — pair with {@link completeLogin}
+   * (interactive/CLI) or {@link login} (auto-detecting).
    */
-  async login(timeoutMs = 300_000): Promise<MediumUser> {
-    // The login window must be visible regardless of the configured headless
-    // mode, and no other context may hold the profile lock.
+  async beginLogin(): Promise<void> {
+    // The login window must be visible regardless of configured headless mode,
+    // and no other context may hold the profile lock.
     await this.close();
-    const ctx = await this.getContext(false);
+    await this.getContext(false);
     const page = await this.getPage(false);
     try {
       await page.goto(SIGNIN_URL, { waitUntil: 'domcontentloaded' });
@@ -249,6 +244,40 @@ export class MediumService {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Confirm the (now hopefully signed-in) session, persist it, and close the
+   * window. Throws if the browser is not actually logged in yet.
+   */
+  async completeLogin(): Promise<MediumUser> {
+    const ctx = this.context;
+    if (!ctx) throw new AuthError('No login window is open. Call beginLogin() first.');
+    const user = await this.confirmLoggedIn(ctx);
+    if (!user) {
+      throw new AuthError(
+        'The browser is not signed in to Medium yet. Finish signing in (including any "verify you are human" check), then try again.',
+      );
+    }
+    this.cachedUser = user;
+    await this.close(); // release the profile lock so publishing can relaunch headless
+    this.logger.info('Medium login successful', { username: user.username });
+    return user;
+  }
+
+  /**
+   * Open a visible browser and auto-detect a completed login (used by the
+   * `medium_login` MCP tool, which has no terminal to prompt in).
+   *
+   * We never reload the user's signin tab — that would interrupt the Cloudflare
+   * challenge / OTP entry. Instead, once the auth cookie appears we confirm the
+   * real login state in a throwaway background tab (see {@link confirmLoggedIn}),
+   * which avoids the false-positive close we'd get from trusting the cookie alone.
+   */
+  async login(timeoutMs = 300_000): Promise<MediumUser> {
+    await this.beginLogin();
+    const ctx = this.context;
+    if (!ctx) throw new AuthError('Failed to open the login window.');
 
     this.logger.info(
       'Waiting for interactive Medium login — sign in and solve any "verify you are human" check in the window…',
@@ -256,18 +285,42 @@ export class MediumService {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (await this.hasAuthCookie(ctx)) {
-        const user = await this.scrapeUserSafe(page);
-        this.cachedUser = user;
-        await this.close(); // release lock so publishing can relaunch headless
-        this.logger.info('Medium login successful', { username: user.username });
-        return user;
+        const user = await this.confirmLoggedIn(ctx);
+        if (user) {
+          this.cachedUser = user;
+          await this.close();
+          this.logger.info('Medium login successful', { username: user.username });
+          return user;
+        }
       }
-      await page.waitForTimeout(2_000);
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
     await this.close();
     throw new AuthError(
       'Timed out waiting for Medium login. Run `medium_login` (or `bun run login`) and complete sign-in in the window.',
     );
+  }
+
+  /**
+   * Reliable "are we logged in?" probe. Opens a throwaway tab and loads
+   * `medium.com/me`: when authenticated it redirects to the user's profile
+   * (`/@username`); when not, it redirects to signin. The user's own tab is
+   * never touched. Returns the resolved user, or null if not logged in.
+   */
+  private async confirmLoggedIn(ctx: BrowserContext): Promise<MediumUser | null> {
+    const probe = await ctx.newPage();
+    try {
+      await probe.goto(`${MEDIUM_ORIGIN}/me`, { waitUntil: 'domcontentloaded' });
+      const url = probe.url();
+      if (/\/m\/signin|\/signin\b/.test(url)) return null;
+      const username = /@([^/?#]+)/.exec(url)?.[1];
+      if (!username) return null; // challenge page or not redirected to a profile
+      return await this.scrapeUser(probe);
+    } catch {
+      return null;
+    } finally {
+      await probe.close().catch(() => undefined);
+    }
   }
 
   /** Delete the persisted session so the next login starts fresh. */
@@ -294,10 +347,10 @@ export class MediumService {
     if (!this.hasSession()) return { valid: false, reason: 'No saved session. Run `medium_login`.' };
     try {
       const ctx = await this.getContext();
-      if (!(await this.hasAuthCookie(ctx))) {
+      const user = await this.confirmLoggedIn(ctx);
+      if (!user) {
         return { valid: false, reason: 'Session expired or signed out. Run `medium_login`.' };
       }
-      const user = await this.scrapeUserSafe(await this.getPage());
       this.cachedUser = user;
       return { valid: true, user };
     } catch (err) {
@@ -311,32 +364,13 @@ export class MediumService {
   async currentUser(force = false): Promise<MediumUser> {
     if (this.cachedUser && !force) return this.cachedUser;
     const ctx = await this.getContext();
-    if (!(await this.hasAuthCookie(ctx))) {
+    const user = await this.confirmLoggedIn(ctx);
+    if (!user) {
       throw new AuthError('Not logged in to Medium. Run the `medium_login` tool first.');
     }
-    this.cachedUser = await this.scrapeUserSafe(await this.getPage());
+    this.cachedUser = user;
     this.logger.debug('Fetched current user', { username: this.cachedUser.username });
     return this.cachedUser;
-  }
-
-  /**
-   * Navigate to the profile and scrape the user; tolerant of a challenge page,
-   * returning a minimal placeholder rather than throwing (the session is still
-   * valid — proven by the auth cookie — even if the profile page can't be read).
-   */
-  private async scrapeUserSafe(page: Page): Promise<MediumUser> {
-    try {
-      await page.goto(`${MEDIUM_ORIGIN}/me`, { waitUntil: 'domcontentloaded' });
-      return await this.scrapeUser(page);
-    } catch {
-      return {
-        id: 'me',
-        username: 'me',
-        name: 'Medium user',
-        url: `${MEDIUM_ORIGIN}/me`,
-        imageUrl: '',
-      };
-    }
   }
 
   /**
