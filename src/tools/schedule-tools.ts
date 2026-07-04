@@ -14,7 +14,10 @@ export function registerScheduleTools(tool: Registrar): void {
       'Schedule a stored article to publish at a future ISO-8601 time. The server maintains a local queue (Medium has no native scheduling) and publishes when due while running.',
     inputSchema: {
       id: articleIdField,
-      scheduledFor: z.string().datetime().describe('ISO-8601 timestamp in the future.'),
+      scheduledFor: z
+        .string()
+        .datetime({ offset: true })
+        .describe('ISO-8601 timestamp in the future (UTC "Z" or timezone offset).'),
       publishStatus: publishStatusSchema.default('public'),
       publication: z.string().optional(),
     },

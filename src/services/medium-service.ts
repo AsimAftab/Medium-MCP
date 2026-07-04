@@ -19,7 +19,8 @@ import {
   type Page,
 } from 'playwright';
 import { AuthError, NetworkError } from '../utils/errors.js';
-import { markdownToHtml } from '../utils/markdown.js';
+import { markdownToHtml, htmlToMarkdown } from '../utils/markdown.js';
+import { convertTablesForMedium } from '../utils/tables.js';
 import { toPlainText } from '../utils/text.js';
 import type { Logger } from '../utils/logger.js';
 import type {
@@ -84,6 +85,8 @@ export class MediumService {
   private logger: Logger;
   private context?: BrowserContext;
   private cachedUser?: MediumUser;
+  /** In-flight close, awaited before relaunch so the profile lock is free. */
+  private closing?: Promise<void>;
 
   constructor(options: MediumServiceOptions) {
     this.sessionDir = options.sessionDir;
@@ -123,13 +126,17 @@ export class MediumService {
   async close(): Promise<void> {
     const ctx = this.context;
     this.context = undefined;
-    if (!ctx) return;
-    try {
-      await ctx.close();
-    } catch (err) {
+    if (!ctx) return this.closing;
+    const closePromise = ctx.close().catch((err: unknown) => {
       this.logger.debug('Error closing browser context', {
         error: err instanceof Error ? err.message : String(err),
       });
+    });
+    this.closing = closePromise;
+    try {
+      await closePromise;
+    } finally {
+      if (this.closing === closePromise) this.closing = undefined;
     }
   }
 
@@ -141,6 +148,9 @@ export class MediumService {
    */
   private async getContext(headless = this.headless): Promise<BrowserContext> {
     if (this.context) return this.context;
+    // Wait for any in-flight close (e.g. from reconfigure) so the persistent
+    // profile directory is unlocked before relaunching.
+    if (this.closing) await this.closing.catch(() => undefined);
     try {
       this.context = await chromium.launchPersistentContext(this.sessionDir, {
         headless,
@@ -421,12 +431,19 @@ export class MediumService {
    * - `unlisted` → published, then marked unlisted if the option is available.
    */
   async createPost(request: CreatePostRequest): Promise<MediumPost> {
-    const html =
-      request.contentFormat === 'markdown' ? markdownToHtml(request.content) : request.content;
-    const plain =
-      request.contentFormat === 'markdown'
-        ? toPlainText(request.content)
-        : request.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    // Normalize to Markdown first so tables can be made Medium-safe: the
+    // editor strips <table> markup on paste, so tables are re-rendered as
+    // fixed-width text in a code block (see utils/tables.ts).
+    const sourceMarkdown =
+      request.contentFormat === 'markdown' ? request.content : htmlToMarkdown(request.content);
+    const { converted, tableCount } = convertTablesForMedium(sourceMarkdown);
+    if (tableCount > 0) {
+      this.logger.info(
+        `Converted ${tableCount} table(s) to fixed-width text (Medium has no native tables)`,
+      );
+    }
+    const html = markdownToHtml(converted);
+    const plain = toPlainText(converted);
     const status = request.publishStatus ?? 'draft';
     const ctx = await this.getContext();
     if (!(await this.hasAuthCookie(ctx))) {
@@ -521,8 +538,29 @@ export class MediumService {
         { h: html, p: plain },
       );
       if (result !== 'ok') throw new Error(`no editable target for paste (${result})`);
-      // Give Medium's editor a moment to render the pasted nodes.
-      await page.waitForTimeout(1_500);
+      // Verify the editor actually rendered the pasted content instead of
+      // trusting a fixed delay: poll until a fragment of the body text shows
+      // up inside the contenteditable region. Compare alphanumerics only —
+      // markdown-it's typographer rewrites quotes/dashes, so raw text differs.
+      const normalize = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+      const probe = normalize(plain).slice(0, 40);
+      const deadline = Date.now() + 10_000;
+      let landed = probe.length === 0;
+      while (!landed && Date.now() < deadline) {
+        await page.waitForTimeout(500);
+        const editorText = await page
+          .evaluate(() => {
+            const g = globalThis as unknown as {
+              document: { querySelector(sel: string): { textContent: string | null } | null };
+            };
+            return g.document.querySelector('[contenteditable="true"]')?.textContent ?? '';
+          })
+          .catch(() => '');
+        landed = normalize(editorText).includes(probe);
+      }
+      if (!landed) throw new Error('pasted content did not appear in the editor');
+      // Give Medium's editor a beat to finish normalizing the pasted nodes.
+      await page.waitForTimeout(1_000);
     } catch (err) {
       // Fallback: type the plain text so at least the content lands.
       this.logger.warn('HTML paste failed; falling back to plain-text insert', {
@@ -541,9 +579,12 @@ export class MediumService {
     const deadline = Date.now() + Math.max(this.actionTimeoutMs, 45_000);
     const isChallenge = (t: string): boolean =>
       /just a moment|verify you are human|attention required|access denied/i.test(t);
+    // Any of the known title selectors counts as "editor ready" — Medium's
+    // markup varies across rollouts, so don't depend on the first one only.
+    const anyTitle = SELECTORS.title.join(', ');
     while (Date.now() < deadline) {
       const title = await page.title().catch(() => '');
-      if (!isChallenge(title) && (await page.locator(SELECTORS.title[0]!).count()) > 0) return;
+      if (!isChallenge(title) && (await page.locator(anyTitle).count()) > 0) return;
       await page.waitForTimeout(1_000);
     }
     const finalTitle = await page.title().catch(() => '');

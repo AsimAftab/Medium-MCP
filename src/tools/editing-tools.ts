@@ -146,7 +146,8 @@ export function registerEditingTools(tool: Registrar): void {
   tool({
     name: 'generate_table',
     title: 'Generate Markdown Table',
-    description: 'Build a Markdown table from headers and rows (deterministic).',
+    description:
+      'Build a Markdown table from headers and rows (deterministic). Tables are kept as GFM Markdown in drafts; on publish they are automatically re-rendered as fixed-width text in a code block, since Medium has no native table support.',
     inputSchema: {
       headers: z.array(z.string().min(1)).min(1),
       rows: z.array(z.array(z.string())).default([]),

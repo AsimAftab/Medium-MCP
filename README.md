@@ -41,6 +41,9 @@ generate, edit, optimize, schedule and publish Medium articles** from natural la
   beginners, explain with analogies, humanize, stronger hook/conclusion, …).
 - **Publishing** — publish to Medium as draft / public / unlisted with a pre-publish
   quality gate; bulk publish; import/export Markdown, HTML, JSON and plain text.
+  Markdown tables are automatically converted to fixed-width text tables on
+  publish (Medium's editor has no native table support and strips `<table>`
+  markup on paste).
 - **Draft & article management** — local store with search, duplicate, archive,
   version history, rollback and autosave recovery.
 - **Scheduling** — local scheduling queue with a background poller (Medium has no

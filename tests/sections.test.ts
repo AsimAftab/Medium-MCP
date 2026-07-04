@@ -61,6 +61,11 @@ describe('section manipulation', () => {
     expect(out).toContain('Intro body.');
   });
 
+  it('renames headings containing dollar signs literally', () => {
+    const out = renameHeading(doc, 'Intro', 'Plans: $1 vs $2 & $&');
+    expect(out).toContain('## Plans: $1 vs $2 & $&');
+  });
+
   it('throws for a missing section', () => {
     expect(() => deleteSection(doc, 'Nope')).toThrow();
   });

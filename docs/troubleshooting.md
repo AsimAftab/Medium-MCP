@@ -61,3 +61,11 @@ directory or the variable, point it back at the original folder.
 Set `MEDIUM_LOG_LEVEL=debug` (or `MEDIUM_VERBOSE=true`) in the server env, or call
 `reload_config` with `{ "overrides": { "MEDIUM_LOG_LEVEL": "debug" } }`. Logs go to
 stderr as JSON lines with a `requestId` per tool call.
+
+### Tables look like code blocks on Medium
+
+That is by design. Medium's editor has no native table support — pasted `<table>`
+markup is silently stripped, losing the content. On publish, medium-mcp re-renders
+every Markdown table as a fixed-width Unicode box table inside a code block so the
+data survives intact and stays readable. Your local draft keeps the original GFM
+Markdown table; only the published copy is transformed.

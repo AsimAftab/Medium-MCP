@@ -4,10 +4,13 @@
  * degrades gracefully: research tools return an instruction for the host model
  * to perform the research instead of failing.
  */
-import axios from 'axios';
+import axios, { isAxiosError } from 'axios';
 import type { AppConfig, ResearchProvider } from '../config/config.js';
-import { AppError, ConfigError } from '../utils/errors.js';
+import { AppError, ConfigError, NetworkError } from '../utils/errors.js';
 import type { Logger } from '../utils/logger.js';
+
+/** Hard cap on provider HTTP calls so a stalled provider cannot hang a tool call. */
+const REQUEST_TIMEOUT_MS = 15_000;
 
 export interface ResearchResult {
   title: string;
@@ -81,9 +84,17 @@ export class ResearchService {
         provider,
         error: err instanceof Error ? err.message : String(err),
       });
-      throw err instanceof AppError
-        ? err
-        : new AppError('Research request failed', { cause: err });
+      if (err instanceof AppError) throw err;
+      if (isAxiosError(err)) {
+        const status = err.response?.status;
+        throw new NetworkError(
+          status
+            ? `Research provider "${provider}" returned HTTP ${status}.`
+            : `Research provider "${provider}" is unreachable or timed out.`,
+          err,
+        );
+      }
+      throw new AppError('Research request failed', { cause: err });
     }
   }
 
@@ -95,11 +106,11 @@ export class ResearchService {
   ): Promise<ResearchResult[]> {
     switch (provider) {
       case 'tavily': {
-        const res = await axios.post('https://api.tavily.com/search', {
-          api_key: key,
-          query,
-          max_results: maxResults,
-        });
+        const res = await axios.post(
+          'https://api.tavily.com/search',
+          { api_key: key, query, max_results: maxResults },
+          { timeout: REQUEST_TIMEOUT_MS },
+        );
         return (res.data.results ?? []).map(
           (r: { title: string; url: string; content: string; score?: number }) => ({
             title: r.title,
@@ -113,6 +124,7 @@ export class ResearchService {
         const res = await axios.get('https://api.search.brave.com/res/v1/web/search', {
           headers: { 'X-Subscription-Token': key, Accept: 'application/json' },
           params: { q: query, count: maxResults },
+          timeout: REQUEST_TIMEOUT_MS,
         });
         return (res.data.web?.results ?? []).map(
           (r: { title: string; url: string; description: string }) => ({
@@ -129,7 +141,7 @@ export class ResearchService {
             model: 'sonar',
             messages: [{ role: 'user', content: `Research and cite sources for: ${query}` }],
           },
-          { headers: { Authorization: `Bearer ${key}` } },
+          { headers: { Authorization: `Bearer ${key}` }, timeout: REQUEST_TIMEOUT_MS },
         );
         const content: string = res.data.choices?.[0]?.message?.content ?? '';
         const citations: string[] = res.data.citations ?? [];
@@ -143,7 +155,7 @@ export class ResearchService {
         const res = await axios.post(
           'https://api.firecrawl.dev/v1/search',
           { query, limit: maxResults },
-          { headers: { Authorization: `Bearer ${key}` } },
+          { headers: { Authorization: `Bearer ${key}` }, timeout: REQUEST_TIMEOUT_MS },
         );
         return (res.data.data ?? []).map(
           (r: { title: string; url: string; description?: string }) => ({

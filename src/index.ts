@@ -31,11 +31,17 @@ async function main(): Promise<void> {
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // Log, then exit: after an uncaught exception the process (and possibly the
+  // stdio transport) is in an undefined state — limping on risks corrupt data.
   process.on('uncaughtException', (err) => {
     logger.error('Uncaught exception', { error: err.message, stack: err.stack });
+    container.scheduler.stop();
+    process.exit(1);
   });
   process.on('unhandledRejection', (reason) => {
     logger.error('Unhandled rejection', { reason: String(reason) });
+    container.scheduler.stop();
+    process.exit(1);
   });
 }
 

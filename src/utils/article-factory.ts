@@ -25,19 +25,20 @@ export function enrichArticle(article: Article): Article {
   const plainText = toPlainText(article.markdown);
   const firstParagraph = plainText.split('\n\n')[0] ?? plainText;
 
+  // Derived fields are always recomputed from the current title/body so an
+  // update (e.g. retitle) can never leave a stale slug or meta description.
+  const slug = slugify(article.title);
   return {
     ...article,
-    slug: article.slug ?? slugify(article.title),
+    slug,
     html: markdownToHtml(article.markdown),
     plainText,
     seo: {
       ...article.seo,
       keywords,
-      slug: article.slug ?? slugify(article.title),
-      seoTitle: article.seo.seoTitle ?? truncateWords(article.title, 60),
-      metaDescription:
-        article.seo.metaDescription ??
-        truncateWords(firstParagraph.replace(/\n+/g, ' '), 158),
+      slug,
+      seoTitle: truncateWords(article.title, 60),
+      metaDescription: truncateWords(firstParagraph.replace(/\n+/g, ' '), 158),
       wordCount: countWords(article.markdown),
       readingTimeMinutes: readingTimeMinutes(article.markdown),
       readabilityScore: fleschReadingEase(article.markdown),

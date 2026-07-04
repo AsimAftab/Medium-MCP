@@ -49,9 +49,19 @@ describe('text utilities', () => {
     expect(density.agents).toBeCloseTo(75, 0);
   });
 
-  it('truncates on word boundary with ellipsis', () => {
+  it('computes density for multi-word phrase keywords', () => {
+    const density = keywordDensity(
+      'machine learning is fun. machine learning works. learning machines differ.',
+      ['machine learning'],
+    );
+    expect(density['machine learning']).toBeGreaterThan(0);
+  });
+
+  it('truncates on word boundary with ellipsis, never exceeding maxChars', () => {
     const out = truncateWords('the quick brown fox jumps', 12);
     expect(out.endsWith('…')).toBe(true);
-    expect(out.length).toBeLessThanOrEqual(13);
+    expect(out.length).toBeLessThanOrEqual(12);
+    // Long unspaced strings still respect the bound.
+    expect(truncateWords('a'.repeat(50), 10).length).toBeLessThanOrEqual(10);
   });
 });

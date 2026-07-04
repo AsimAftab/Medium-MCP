@@ -99,16 +99,23 @@ export class PublisherService {
   }
 
   /**
-   * Compose the Markdown sent to Medium. Medium renders the first H1 as the
-   * title, so we prepend the title and optional subtitle for correct display.
+   * Compose the Markdown body sent to Medium. The browser backend types the
+   * title into the editor's dedicated title field, so the body must NOT repeat
+   * it as an H1 (that would render the title twice). A leading H1 that matches
+   * the title is stripped for the same reason.
    */
   private composeContent(article: Article): string {
-    const parts: string[] = [`# ${article.title}`];
-    if (article.subtitle) parts.push(`\n*${article.subtitle}*`);
+    const parts: string[] = [];
+    if (article.subtitle) parts.push(`*${article.subtitle}*`);
     if (article.featuredImageUrl) {
-      parts.push(`\n![${article.title}](${article.featuredImageUrl})`);
+      parts.push(`![${article.title}](${article.featuredImageUrl})`);
     }
-    parts.push(`\n${article.markdown.trim()}`);
-    return parts.join('\n');
+    let body = article.markdown.trim();
+    const leadingH1 = /^#\s+(.+)\s*\n+/.exec(body);
+    if (leadingH1 && leadingH1[1]!.trim().toLowerCase() === article.title.trim().toLowerCase()) {
+      body = body.slice(leadingH1[0].length).trimStart();
+    }
+    parts.push(body);
+    return parts.join('\n\n');
   }
 }

@@ -61,7 +61,9 @@ export class Logger {
   }
 
   private write(level: LogLevel, message: string, fields?: LogFields): void {
-    if (LEVEL_WEIGHT[level] > LEVEL_WEIGHT[this.level]) return;
+    // Verbose mode lets debug records through regardless of the level filter.
+    const allowVerboseDebug = this.verbose && level === 'debug';
+    if (LEVEL_WEIGHT[level] > LEVEL_WEIGHT[this.level] && !allowVerboseDebug) return;
     const record = {
       ts: new Date().toISOString(),
       level,

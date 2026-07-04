@@ -31,6 +31,8 @@ interface StoreShape {
 }
 
 const MAX_REVISIONS = 50;
+/** How long completed/cancelled/failed schedule entries are retained. */
+const SCHEDULE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface ListFilter {
   isDraft?: boolean;
@@ -76,8 +78,17 @@ export class DraftStore {
       await fs.writeFile(tmp, JSON.stringify(this.cache, null, 2), 'utf8');
       await fs.rename(tmp, this.file);
     };
-    this.writeLock = this.writeLock.then(run, run);
-    return this.writeLock;
+    const attempt = this.writeLock.then(run, run);
+    // Keep the lock chain healthy even when this write fails.
+    this.writeLock = attempt.catch(() => undefined);
+    try {
+      await attempt;
+    } catch (err) {
+      // The in-memory cache now diverges from disk; drop it so the next read
+      // reloads the last durably-written state instead of serving phantom data.
+      this.cache = undefined;
+      throw err;
+    }
   }
 
   /** Create a new article record. */
@@ -221,8 +232,21 @@ export class DraftStore {
       status: 'pending',
     };
     store.schedule.push(scheduled);
+    this.pruneSchedule(store);
     await this.persist();
     return scheduled;
+  }
+
+  /**
+   * Drop terminal (published/cancelled/failed) schedule entries older than the
+   * retention window so the queue cannot grow without bound. Pending entries
+   * are always kept.
+   */
+  private pruneSchedule(store: StoreShape): void {
+    const cutoff = Date.now() - SCHEDULE_RETENTION_MS;
+    store.schedule = store.schedule.filter(
+      (s) => s.status === 'pending' || Date.parse(s.createdAt) >= cutoff,
+    );
   }
 
   async listSchedule(includeCompleted = false): Promise<ScheduledPublish[]> {

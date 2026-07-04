@@ -28,7 +28,74 @@ interface TurndownNode {
   firstChild: TurndownNode | null;
   textContent: string | null;
   getAttribute?(name: string): string | null;
+  parentNode?: TurndownNode | null;
+  childNodes?: ArrayLike<TurndownNode>;
+  previousSibling?: TurndownNode | null;
 }
+
+// ── GFM table support (Turndown has none built in) ─────────────────────────
+
+/** Number of `th`/`td` cells in the first row of the table containing `node`. */
+function tableColumnCount(node: TurndownNode): number {
+  let table: TurndownNode | null | undefined = node;
+  while (table && table.nodeName !== 'TABLE') table = table.parentNode;
+  const firstRow = table
+    ? Array.from(table.childNodes ?? [])
+        .flatMap((section) =>
+          section.nodeName === 'TR' ? [section] : Array.from(section.childNodes ?? []),
+        )
+        .find((n) => n.nodeName === 'TR')
+    : undefined;
+  if (!firstRow) return 0;
+  return Array.from(firstRow.childNodes ?? []).filter(
+    (n) => n.nodeName === 'TH' || n.nodeName === 'TD',
+  ).length;
+}
+
+/** Whether this row is the first row of its table (renders the delimiter). */
+function isHeadingRow(row: TurndownNode): boolean {
+  const parent = row.parentNode;
+  if (!parent) return false;
+  if (parent.nodeName === 'THEAD') return true;
+  const table = parent.nodeName === 'TABLE' ? parent : parent.parentNode;
+  if (!table || table.nodeName !== 'TABLE') return false;
+  const rows = Array.from(table.childNodes ?? []).flatMap((section) =>
+    section.nodeName === 'TR' ? [section] : Array.from(section.childNodes ?? []),
+  );
+  return rows.find((n) => n.nodeName === 'TR') === row;
+}
+
+turndown.addRule('tableCell', {
+  filter: ['th', 'td'],
+  replacement: (content, node): string => {
+    const cell = node as unknown as TurndownNode;
+    const prefix = cell.previousSibling ? ' ' : '| ';
+    return `${prefix}${content.trim().replace(/\n+/g, ' ').replace(/\|/g, '\\|')} |`;
+  },
+});
+
+turndown.addRule('tableRow', {
+  filter: 'tr',
+  replacement: (content, node): string => {
+    const row = node as unknown as TurndownNode;
+    let delimiter = '';
+    if (isHeadingRow(row)) {
+      const columns = tableColumnCount(row);
+      delimiter = `\n|${' --- |'.repeat(columns)}`;
+    }
+    return `\n${content}${delimiter}`;
+  },
+});
+
+turndown.addRule('table', {
+  filter: 'table',
+  replacement: (content): string => `\n\n${content.trim()}\n\n`,
+});
+
+turndown.addRule('tableSection', {
+  filter: ['thead', 'tbody', 'tfoot'],
+  replacement: (content): string => content,
+});
 
 // Preserve fenced code language hints when converting HTML → Markdown.
 turndown.addRule('fencedCodeBlock', {
@@ -112,32 +179,59 @@ export function generateTableOfContents(markdown: string): string {
  *  - trim trailing whitespace
  */
 export function fixMarkdown(markdown: string): { fixed: string; changes: string[] } {
-  const changes: string[] = [];
-  let text = markdown.replace(/\r\n/g, '\n');
+  const changes = new Set<string>();
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  const out: string[] = [];
+  let inFence = false;
+  let blankRun = 0;
 
-  const before = text;
-  text = text.replace(/^(#{1,6})([^#\s])/gm, '$1 $2');
-  if (text !== before) changes.push('Added missing space after heading markers');
+  for (const rawLine of lines) {
+    const isFenceMarker = /^\s*(```|~~~)/.test(rawLine);
+    // Code blocks are copied verbatim — repairing "headings" or whitespace
+    // inside them would corrupt code (e.g. `#include`, shebangs, comments).
+    if (inFence || isFenceMarker) {
+      out.push(rawLine);
+      blankRun = 0;
+      if (isFenceMarker) inFence = !inFence;
+      continue;
+    }
 
-  const trailing = text;
-  text = text.replace(/[ \t]+$/gm, '');
-  if (text !== trailing) changes.push('Removed trailing whitespace');
+    let line = rawLine;
+    const spaced = line.replace(/^(#{1,6})([^#\s])/, '$1 $2');
+    if (spaced !== line) {
+      changes.add('Added missing space after heading markers');
+      line = spaced;
+    }
+    const trimmed = line.replace(/[ \t]+$/, '');
+    if (trimmed !== line) {
+      changes.add('Removed trailing whitespace');
+      line = trimmed;
+    }
 
-  // Blank line before headings (except at start of doc).
-  text = text.replace(/([^\n])\n(#{1,6}\s)/g, '$1\n\n$2');
+    if (line === '') {
+      blankRun += 1;
+      if (blankRun >= 2) {
+        changes.add('Collapsed excessive blank lines');
+        continue;
+      }
+      out.push(line);
+      continue;
+    }
 
-  // Collapse excessive blank lines.
-  const collapsed = text;
-  text = text.replace(/\n{3,}/g, '\n\n');
-  if (text !== collapsed) changes.push('Collapsed excessive blank lines');
-
-  // Close an odd number of code fences.
-  const fenceCount = (text.match(/^```/gm) ?? []).length;
-  if (fenceCount % 2 !== 0) {
-    text = `${text.replace(/\n*$/, '')}\n\`\`\`\n`;
-    changes.push('Closed an unterminated code fence');
+    // Blank line before headings (except at start of doc).
+    if (/^#{1,6}\s/.test(line) && out.length > 0 && out[out.length - 1] !== '') {
+      out.push('');
+      changes.add('Added blank line before headings');
+    }
+    blankRun = 0;
+    out.push(line);
   }
 
-  text = `${text.trim()}\n`;
-  return { fixed: text, changes };
+  if (inFence) {
+    out.push('```');
+    changes.add('Closed an unterminated code fence');
+  }
+
+  const text = `${out.join('\n').trim()}\n`;
+  return { fixed: text, changes: [...changes] };
 }

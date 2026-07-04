@@ -30,10 +30,35 @@ describe('markdown utilities', () => {
     expect(toc).toContain('[One](#one)');
   });
 
+  it('converts markdown tables to html', () => {
+    const html = markdownToHtml('| a | b |\n| --- | --- |\n| 1 | 2 |');
+    expect(html).toContain('<table>');
+    expect(html).toContain('<th>a</th>');
+    expect(html).toContain('<td>2</td>');
+  });
+
+  it('converts html tables back to GFM markdown', () => {
+    const md = htmlToMarkdown(
+      '<table><thead><tr><th>Name</th><th>Role</th></tr></thead>' +
+        '<tbody><tr><td>Ada</td><td>Engineer</td></tr></tbody></table>',
+    );
+    expect(md).toContain('| Name | Role |');
+    expect(md).toContain('| --- | --- |');
+    expect(md).toContain('| Ada | Engineer |');
+  });
+
   it('repairs malformed markdown', () => {
     const { fixed, changes } = fixMarkdown('##Heading\n\n\n\n```js\ncode');
     expect(fixed).toContain('## Heading');
     expect(fixed.match(/```/g)?.length).toBe(2); // fence closed
     expect(changes.length).toBeGreaterThan(0);
+  });
+
+  it('never touches content inside code fences when repairing', () => {
+    const src = '# Title\n\n```c\n#include <stdio.h>\n#!shebang\n\n\n\nint x;\n```\n';
+    const { fixed } = fixMarkdown(src);
+    expect(fixed).toContain('#include <stdio.h>');
+    expect(fixed).toContain('#!shebang');
+    expect(fixed).toContain('\n\n\n\nint x;'); // blank lines in code preserved
   });
 });

@@ -129,9 +129,8 @@ export function renameHeading(markdown: string, oldHeading: string, newHeading: 
   if (!section) throw new Error(`Heading not found: ${oldHeading}`);
   const lines = markdown.split('\n');
   const headingLineIdx = section.startLine - 1;
-  lines[headingLineIdx] = lines[headingLineIdx]!.replace(
-    /^(#{1,6})\s+.*/,
-    `$1 ${newHeading}`,
-  );
+  // Rebuild the line directly — using String.replace with an interpolated
+  // replacement would let `$` sequences in the new heading corrupt the output.
+  lines[headingLineIdx] = `${'#'.repeat(section.level)} ${newHeading.trim()}`;
   return lines.join('\n');
 }

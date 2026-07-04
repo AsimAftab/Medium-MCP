@@ -94,12 +94,13 @@ export function slugify(title: string): string {
     .slice(0, 80);
 }
 
-/** Truncate text on a word boundary, appending an ellipsis if cut. */
+/** Truncate text on a word boundary, appending an ellipsis if cut. The result never exceeds `maxChars`. */
 export function truncateWords(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
-  const clipped = text.slice(0, maxChars);
+  const clipped = text.slice(0, Math.max(1, maxChars - 1));
   const lastSpace = clipped.lastIndexOf(' ');
-  return `${clipped.slice(0, lastSpace > 0 ? lastSpace : maxChars).trim()}…`;
+  const base = lastSpace > 0 ? clipped.slice(0, lastSpace) : clipped;
+  return `${base.trimEnd()}…`;
 }
 
 const STOP_WORDS = new Set([
@@ -125,17 +126,33 @@ export function extractKeywords(markdown: string, limit = 10): string[] {
     .map(([w]) => w);
 }
 
-/** Compute keyword density (% of total words) for the given keywords. */
+/**
+ * Compute keyword density (% of total words) for the given keywords.
+ * Multi-word keywords are matched as consecutive word sequences, so phrase
+ * keywords like "machine learning" are counted correctly.
+ */
 export function keywordDensity(
   markdown: string,
   keywords: string[],
 ): Record<string, number> {
-  const words = toPlainText(markdown).toLowerCase().split(/\s+/).filter(Boolean);
+  const normalize = (w: string): string => w.replace(/[^a-z0-9]/g, '');
+  const words = toPlainText(markdown)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(normalize);
   const total = words.length || 1;
   const density: Record<string, number> = {};
   for (const kw of keywords) {
-    const needle = kw.toLowerCase();
-    const count = words.filter((w) => w.replace(/[^a-z0-9]/g, '') === needle).length;
+    const parts = kw.toLowerCase().split(/\s+/).map(normalize).filter(Boolean);
+    if (parts.length === 0) {
+      density[kw] = 0;
+      continue;
+    }
+    let count = 0;
+    for (let i = 0; i + parts.length <= words.length; i += 1) {
+      if (parts.every((p, j) => words[i + j] === p)) count += 1;
+    }
     density[kw] = Math.round((count / total) * 10000) / 100;
   }
   return density;

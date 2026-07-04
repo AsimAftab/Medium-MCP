@@ -82,11 +82,17 @@ export function createRegistrar(server: McpServer, ctx: Container) {
 
 export type Registrar = ReturnType<typeof createRegistrar>;
 
-/** Redact obviously sensitive fields before logging tool arguments. */
-function redact(args: Record<string, unknown>): Record<string, unknown> {
+/**
+ * Redact obviously sensitive fields before logging tool arguments. Applied
+ * recursively so nested maps (e.g. `reload_config`'s `overrides`, which can
+ * carry API keys) never leak credentials into logs.
+ */
+function redact(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redact);
+  if (value === null || typeof value !== 'object') return value;
   const clone: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(args)) {
-    clone[k] = /token|key|secret|password/i.test(k) ? '«redacted»' : v;
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    clone[k] = /token|key|secret|password/i.test(k) ? '«redacted»' : redact(v);
   }
   return clone;
 }
